@@ -3,12 +3,12 @@ name: Create and publish Container image
 on:
   push:
     branches:
-      - master
-    tags:
-      - 'v*'
+      - brilthor-ci
+#    tags:
+#      - 'v*'
   pull_request:
     branches:
-      - master
+      - brilthor-ci
 
 env:
   REGISTRY: ghcr.io
