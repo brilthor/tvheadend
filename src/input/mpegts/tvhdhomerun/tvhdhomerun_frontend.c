@@ -63,6 +63,7 @@ tvhdhomerun_frontend_input_thread ( void *aux )
   char buf[256];
   char target[64];
   uint32_t local_ip;
+  int local_port;
   int sockfd, nfds;
   int sock_opt = 1;
   int r;
@@ -120,11 +121,13 @@ tvhdhomerun_frontend_input_thread ( void *aux )
     return NULL;
   }
 
+/* address re-use seems to be something we very much don't want
   if(setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (char *) &sock_opt, sizeof(sock_opt)) < 0) {
     close(sockfd);
     tvherror(LS_TVHDHOMERUN, "failed to set address reuse on socket (%d)", errno);
     return NULL;
   }
+*/
 
   /* important: we need large rx buffers to accomodate the large amount of traffic */
   if(setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, (char *) &rx_size, sizeof(rx_size)) < 0) {
@@ -134,11 +137,18 @@ tvhdhomerun_frontend_input_thread ( void *aux )
   memset(&sock_addr, 0, sizeof(sock_addr));
   sock_addr.sin_family = AF_INET;
   sock_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  sock_addr.sin_port = config.local_port==0?0:htons(config.local_port + hfe->hf_tunerNumber);
-  if(bind(sockfd, (struct sockaddr *) &sock_addr, sizeof(sock_addr)) != 0) {
-    tvherror(LS_TVHDHOMERUN, "failed bind socket: %d", errno);
-    close(sockfd);
-    return NULL;
+  local_port = config.local_port;
+  sock_addr.sin_port = config.local_port==0?0:htons(config.local_port);
+
+  while(bind(sockfd, (struct sockaddr *) &sock_addr, sizeof(sock_addr)) != 0) {
+    if ((config.local_port==0) || (local_port > config.local_port + 50)){
+      tvherror(LS_TVHDHOMERUN, "failed bind socket: %d", errno);
+      close(sockfd);
+      return NULL;
+    } else {
+      local_port++;
+      sock_addr.sin_port = htons(local_port);
+    } 
   }
 
   memset(&sock_addr, 0, sizeof(sock_addr));
