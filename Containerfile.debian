@@ -101,6 +101,7 @@ RUN apt-get update --yes && apt-get install --yes \
         'libx265-199' \
         'pngquant' \
         'python3' \
+        'libjson-perl' \
         'mesa-va-drivers' \
         'mesa-vdpau-drivers' \
         'zlib1g' \

@@ -78,6 +78,7 @@ EXPOSE 9981 \
 RUN apk add --no-cache \
         'avahi' \
         'dbus-libs' \
+        'ffmpeg' \
         'ffmpeg4' \
         'ffmpeg4-libavcodec' \
         'ffmpeg4-libavdevice' \
@@ -99,6 +100,7 @@ RUN apk add --no-cache \
         'mesa' \
         'opus' \
         'perl-http-entity-parser' \
+        'perl-json' \
         'pngquant' \
         'python3' \
         'tini' \
