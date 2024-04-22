@@ -356,7 +356,7 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
     socket_set_dscp(hc->hc_fd, config.dscp, NULL, 0);
 
   lastpkt = mclk();
-  ptimeout = prch->prch_pro ? prch->prch_pro->pro_timeout : 5;
+  ptimeout = prch->prch_pro ? prch->prch_pro->pro_timeout : 45;
 
   if (hc->hc_no_output) {
     tvh_mutex_lock(&sq->sq_mutex);
@@ -376,9 +376,11 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
           if (tcp_socket_dead(hc->hc_fd)) {
             tvhdebug(LS_WEBUI,  "Stop streaming %s, client hung up", hc->hc_url_orig);
             run = 0;
-          } else if((!started && mclk() - lastpkt > sec2mono(grace)) ||
-                     (started && ptimeout > 0 && mclk() - lastpkt > sec2mono(ptimeout))) {
-            tvhwarn(LS_WEBUI,  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
+          } else if (!started && mclk() - lastpkt > sec2mono(grace)) {
+            tvhwarn(LS_WEBUI,  "Stop streaming %s, timeout waiting for packets (not started)", hc->hc_url_orig);
+            run = 0;
+          } else if (started && ptimeout > 0 && mclk() - lastpkt > sec2mono(ptimeout)) {
+            tvhwarn(LS_WEBUI,  "Stop streaming %s, timeout waiting for packets (started)", hc->hc_url_orig);
             run = 0;
           }
           break;
@@ -461,7 +463,7 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
         run = 0;
       } else if((!started && mclk() - lastpkt > sec2mono(grace)) ||
                  (started && ptimeout > 0 && mclk() - lastpkt > sec2mono(ptimeout))) {
-        tvhwarn(LS_WEBUI,  "Stop streaming %s, timeout waiting for packets", hc->hc_url_orig);
+        tvhwarn(LS_WEBUI,  "Stop streaming %s, timeout waiting for packets SMT_DESCRAMBLE_INFO", hc->hc_url_orig);
         run = 0;
       }
       break;
