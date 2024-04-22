@@ -340,7 +340,7 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
   int run = 1, started = 0;
   streaming_queue_t *sq = &prch->prch_sq;
   muxer_t *mux = prch->prch_muxer;
-  int ptimeout, grace = 20, r;
+  int ptimeout, grace = 60, r;
   struct timeval tp;
   streaming_start_t *ss_copy;
   int64_t lastpkt, mono;
