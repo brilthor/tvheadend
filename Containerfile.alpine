@@ -60,6 +60,28 @@ RUN apk add --no-cache \
         && \
         make DESTDIR='/tvheadend' -j$(($(nproc) - 1)) install
 
+FROM alpine:${ALPINE_VERSION} AS comskip-builder
+ARG TARGETARCH
+
+RUN apk add --no-cache \
+    autoconf \
+    automake \
+    build-base \
+    ffmpeg-dev \
+    git \
+    libtool \
+    argtable2-dev
+
+#RUN git clone https://github.com/erikkaashoek/Comskip /src/Comskip
+RUN git clone --branch ticks https://github.com/heitbaum/Comskip /src/Comskip
+
+WORKDIR /src/Comskip
+
+RUN ./autogen.sh \
+    && ./configure \
+    && make \
+    && make install DESTDIR=/comskip-install
+
 FROM docker.io/${TARGET_ARCH}/alpine:${ALPINE_VERSION} AS runner
 
 LABEL maintainer="Olliver Schinagl <oliver@schinagl.nl>"
@@ -69,6 +91,7 @@ EXPOSE 9981 \
        9983
 
 RUN apk add --no-cache \
+        'argtable2' \
         'avahi' \
         'bash' \
         'bzip2' \
@@ -101,17 +124,8 @@ RUN apk add --no-cache \
     install -d -m 775 -g 'tvheadend' -o 'tvheadend' '/var/log/tvheadend'
 
 
-RUN if [ "$(uname -m)" = 'x86_64' ]; then apk --no-cache add --virtual=builddeps autoconf automake libtool git ffmpeg-dev wget tar build-base \
-    && cd /tmp && wget http://prdownloads.sourceforge.net/argtable/argtable2-13.tar.gz \
-    && tar xzf argtable2-13.tar.gz \
-    && cd argtable2-13/ && ./configure && make && make install \
-    && cd /tmp && git clone https://github.com/erikkaashoek/Comskip \
-    && cd Comskip && ./autogen.sh && ./configure && make && make install \
-    && apk del builddeps \
-    && rm -rf /var/cache/apk/* /tmp/* /tmp/.[!.]* \
-    ; fi
-
 COPY --from=builder "/tvheadend" "/"
+COPY --from=comskip-builder /comskip-install /
 COPY "./support/container-entrypoint.sh" "/init"
 
 VOLUME /var/lib/tvheadend
