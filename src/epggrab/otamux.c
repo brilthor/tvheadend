@@ -936,10 +936,10 @@ epggrab_ota_init ( void )
   mpegts_add_listener(&ml);
 
   /* Delete old config */
-  hts_settings_buildpath(path, sizeof(path), "epggrab/otamux");
-  if (!lstat(path, &st))
-    if (!S_ISDIR(st.st_mode))
-      hts_settings_remove("epggrab/otamux");
+  if (!hts_settings_buildpath(path, sizeof(path), "epggrab/otamux"))
+    if (!lstat(path, &st))
+      if (!S_ISDIR(st.st_mode))
+        hts_settings_remove("epggrab/otamux");
 
   atomic_set(&epggrab_ota_running, 1);
 
@@ -1139,6 +1139,23 @@ epggrab_ota_set_genre_translation ( void )
   free(tempPair);
 
   tvh_mutex_unlock(&epggrab_ota_mutex);
+}
+
+/* **************************************************************************
+ * Get the time for the next scheduled ota grabber
+ * *************************************************************************/
+time_t epggrab_get_next_ota(void)
+{
+  time_t ret_time = 0;
+  
+  if(!cron_multi_next(epggrab_ota_cron_multi, gclk(), &ret_time))
+  {
+    return ret_time;
+  }
+  else
+  {
+    return 0;
+  }
 }
 
 /******************************************************************************

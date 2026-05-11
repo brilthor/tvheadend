@@ -113,6 +113,7 @@ idnode_insert(idnode_t *in, const char *uuid, const idclass_t *class, int flags)
 
     if (uuid_set(&u, uuid)) {
       in->in_class = NULL;
+      idnode_unlock();
       return -1;
     }
     uuid_duplicate(&in->in_uuid, &u);
@@ -391,6 +392,7 @@ idnode_get_u32
       ptr = ((void*)self) + p->off;
     switch (p->type) {
       case PT_INT:
+      case PT_DYN_INT:
       case PT_BOOL:
         *u32 = *(int*)ptr;
         return 0;
@@ -425,6 +427,7 @@ idnode_get_s64
       ptr = ((void*)self) + p->off;
     switch (p->type) {
       case PT_INT:
+      case PT_DYN_INT:
       case PT_BOOL:
         *s64 = *(int*)ptr;
         return 0;
@@ -495,6 +498,7 @@ idnode_get_dbl
       ptr = ((void*)self) + p->off;
     switch (p->type) {
       case PT_INT:
+      case PT_DYN_INT:
       case PT_BOOL:
         *dbl = *(int*)ptr;
         return 0;
@@ -761,6 +765,7 @@ idnode_cmp_sort
       }
       break;
     case PT_INT:
+    case PT_DYN_INT:
     case PT_U16:
     case PT_BOOL:
     case PT_PERM:
@@ -950,6 +955,7 @@ idnode_filter_add_str
   ele->comp = comp;
   if (comp == IC_RE) {
     if (regcomp(&ele->u.re, val, REG_ICASE | REG_EXTENDED | REG_NOSUB)) {
+      free(ele->key);
       free(ele);
       return;
     }

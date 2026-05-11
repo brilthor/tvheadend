@@ -1221,6 +1221,15 @@ dvr_entry_create_from_htsmsg(htsmsg_t *conf, epg_broadcast_t *e)
         if(e->rating_label->rl_icon){
           htsmsg_add_str(conf, "rating_icon_saved", imagecache_get_propstr(e->rating_label->rl_icon, tbuf, sizeof(tbuf)));
         }
+
+        if(e->rating_label->rl_country){
+          htsmsg_add_str(conf, "rating_country_saved", e->rating_label->rl_country);
+        }
+
+        if(e->rating_label->rl_authority){
+          htsmsg_add_str(conf, "rating_authority_saved", e->rating_label->rl_authority);
+        }
+
       }
     }//END rating labels enabled.
 
@@ -1480,6 +1489,7 @@ not_so_good:
   htsmsg_add_str2(conf, "owner", de->de_owner);
   htsmsg_add_str2(conf, "creator", de->de_creator);
   htsmsg_add_str(conf, "comment", buf);
+  htsmsg_add_str2(conf, "directory", de->de_directory);
   de2 = dvr_entry_create_from_htsmsg(conf, e);
   htsmsg_destroy(conf);
 
@@ -2387,10 +2397,11 @@ dvr_timer_remove_files(void *aux)
 #define DVR_UPDATED_PLAYPOS      (1<<18)
 #define DVR_UPDATED_PLAYCOUNT    (1<<19)
 #define DVR_UPDATED_AGE_RATING   (1<<20)
+#define DVR_UPDATED_COMMENT      (1<<21)
 
 static char *dvr_updated_str(char *buf, size_t buflen, int flags)
 {
-  static const char *x = "ecoOsStumdpgrviBEC";
+  static const char *x = "ecoOsStumdpgrviBECPaAM";
   const char *p = x;
   char *w = buf, *end = buf + buflen;
 
@@ -2435,7 +2446,7 @@ static dvr_entry_t *_dvr_entry_update
     time_t start_extra, time_t stop_extra,
     dvr_prio_t pri, int retention, int removal,
     int playcount, int playposition, int age_rating,
-    ratinglabel_t *rating_label)
+    ratinglabel_t *rating_label, const char *comment)
 {
   char buf[40];
   int save = 0, updated = 0;
@@ -2557,6 +2568,13 @@ static dvr_entry_t *_dvr_entry_update
     save |= DVR_UPDATED_AGE_RATING;
   }
 
+  /* Comment */
+  if (comment && strcmp(de->de_comment ?: "", comment)) {
+    free(de->de_comment);
+    de->de_comment = strdup(comment);
+    save |= DVR_UPDATED_COMMENT;
+  }
+
   /* Title */
   if (e && e->title) {
     save |= lang_str_set2(&de->de_title, e->title) ? DVR_UPDATED_TITLE : 0;
@@ -2673,13 +2691,13 @@ dvr_entry_update
     time_t start, time_t stop,
     time_t start_extra, time_t stop_extra,
     dvr_prio_t pri, int retention, int removal, int playcount, int playposition,
-    int age_rating, ratinglabel_t *rating_label )
+    int age_rating, ratinglabel_t *rating_label, const char *comment)
 {
   return _dvr_entry_update(de, enabled, dvr_config_uuid,
                            NULL, ch, title, subtitle, summary, desc, lang,
                            start, stop, start_extra, stop_extra,
                            pri, retention, removal, playcount, playposition,
-                           age_rating, rating_label);
+                           age_rating, rating_label, comment);
 }
 
 /**
@@ -2733,7 +2751,7 @@ dvr_event_replaced(epg_broadcast_t *e, epg_broadcast_t *new_e)
                           gmtime2local(e2->start, t1buf, sizeof(t1buf)),
                           gmtime2local(e2->stop, t2buf, sizeof(t2buf)));
           _dvr_entry_update(de, -1, NULL, e2, NULL, NULL, NULL, NULL, NULL,
-                            NULL, 0, 0, 0, 0, DVR_PRIO_NOTSET, 0, 0, -1, -1, 0, NULL);
+                            NULL, 0, 0, 0, 0, DVR_PRIO_NOTSET, 0, 0, -1, -1, 0, NULL, NULL);
           return;
         }
       }
@@ -2774,7 +2792,7 @@ void dvr_event_updated(epg_broadcast_t *e)
     assert(de->de_bcast == e);
     if (de->de_sched_state != DVR_SCHEDULED) continue;
     _dvr_entry_update(de, -1, NULL, e, NULL, NULL, NULL, NULL, NULL,
-                      NULL, 0, 0, 0, 0, DVR_PRIO_NOTSET, 0, 0, -1, -1, 0, NULL);
+                      NULL, 0, 0, 0, 0, DVR_PRIO_NOTSET, 0, 0, -1, -1, 0, NULL, NULL);
   }
   LIST_FOREACH(de, &e->channel->ch_dvrs, de_channel_link) {
     if (de->de_sched_state != DVR_SCHEDULED) continue;
@@ -2786,7 +2804,7 @@ void dvr_event_updated(epg_broadcast_t *e)
                             epg_broadcast_get_title(e, NULL),
                             channel_get_name(e->channel, channel_blank_name));
       _dvr_entry_update(de, -1, NULL, e, NULL, NULL, NULL, NULL, NULL,
-                        NULL, 0, 0, 0, 0, DVR_PRIO_NOTSET, 0, 0, -1, -1, 0, NULL);
+                        NULL, 0, 0, 0, 0, DVR_PRIO_NOTSET, 0, 0, -1, -1, 0, NULL, NULL);
     }
   }
 }
@@ -2892,6 +2910,175 @@ void dvr_event_running(epg_broadcast_t *e, epg_running_t running)
   }
 }
 
+/*
+ * Create an sm file for the dvr entry provided
+ * An 'sm' file is in edl file format, but contains the
+ * TVH-generated scene markers based on the scheduled
+ * EPG start/stop times.
+ * The cutpoint parser will merge these entries with the
+ * other cutpoint files found.
+ *
+ * SM/EDL file format
+ * [start time] [end time] [action]
+ *
+ * action = 2 is a 'scene marker'
+ *
+ * Kodi only recognises the end time: https://kodi.wiki/view/Edit_decision_list
+ * However, both start and stop are saved because other applications may use them.
+ *
+ * TODO - Investigate writing the start marker when the recording passes the epg start point
+ *        This could be handy when chase-playing a recording-in-progress.
+ */
+void
+dvr_create_recording_scene_markers(dvr_entry_t *de)
+{
+  //If writing an sm is not enabled for this dvr profile, then there is nothing to do.  Sayonara!
+  if(!de->de_config->dvr_create_scene_markers)
+  {
+    return;
+  }
+
+  tvhtrace(LS_DVR, "Creating scene markers");
+
+  time_t          file_start = 0;               //Recording file start timestamp
+  time_t          file_stop = 0;                //Recording file stop timestamp
+  int             temp_len = 0;                 //Length of the recording file name
+  int             temp_pos = 0;                 //Position in the filename to append the '.sm' extension
+  const char      *filename = NULL;             //Recording file name
+  int             filecount = 0;                //Number of files in this recording
+  char            *temp_filename = NULL;        //File name for the sm file
+  FILE            *sm_file;                     //File handle for the sm file
+  time_t          segment_1_start = 0;          //Start position (seconds) for the first marker
+  time_t          segment_1_stop = 0;           //Stop position (seconds) for the first marker
+  time_t          segment_2_start = 0;          //Start position (seconds) for the second marker
+  time_t          segment_2_stop = 0;           //Stop position (seconds) for the second marker
+
+  filename = dvr_get_filename(de);
+
+  //The file start/stop timestamps are not directly available from the main dvr record
+  //structure, they need to be obtained by reading through the recording file list
+  //and saving those values.
+  dvr_get_files_details(de, &file_start, &file_stop, &filecount);
+  
+  //If recording contains more than one file, don't process it.  ('too hard' basket).
+  //TODO - A lot more research is required into multiple files per recording.
+  //       How are they created?
+  //       Is there a gap in time between the files or are they contiguous?
+  //       If there is a gap, how should this be accounted for?
+  //       A. A multiple file situation can be forced by stopping TVH
+  //          part way through a recording and then starting it again
+  //          before the recording was due to end.
+  //          ?Perhaps each file should also have its own scene marker?
+  //          A 37 minute recording with a gap in the middle
+  //          will not yield 37 minutes of playable files.
+  //          It will be 37 minutes minus Y.
+  //
+  //             |--2-min ---|------30 minutes-----|----5-min---|
+  //             |--2-min ---|-X-|----Y-----|--Z---|----5-min---|
+  // |--warm-up--|--pre-pad--|--------event--------|--post-pad--|
+  // |------------------service-subscription--------------------|
+  //             |----file-1-----|--outage--|-----file-2--------|
+  //
+  // warm-up starts at:     dvr_entry_get_start_time(de, 1)
+  // file starts at:        file_start
+  // recording starts at:   dvr_entry_get_start_time(de, 0)
+  // EPG event starts at:   de->de_start
+  // EPG event stops at:    de->de_stop
+  // recording stops at:    dvr_entry_get_stop_time(de)
+  // file stops at:         file_stop
+  //
+  // Under ideal circumstances, this is what should happen:
+  // The event and padding are fully covered by the recording.
+  // |--warm-up--|--pre-pad--|--------event--------|--post-pad--|
+  // |------------------service-subscription--------------------|
+  //             |---------------recording----------------------|
+  //                         ^                     ^
+  //                    scene marker          scene marker
+  
+  if(de->de_start && de->de_stop && filecount == 1)
+  {
+    //Build a temporary file name for the SM file.
+    temp_len = strlen(filename);
+    temp_filename = calloc(1, temp_len + 8);  //Existing file name length plus some space.
+
+    if(!temp_filename)
+    {
+      tvherror(LS_DVR, "Unable to allocate space for sm file name.");
+      return;
+    }
+
+    //Find the position of the last dot before the extension in the file name
+    char *last_dot = strrchr(filename, '.');
+
+    if (!last_dot)
+    {
+      tvherror(LS_DVR, "Unable to locate extension in '%s'.", filename);
+      free(temp_filename);
+      return;
+    }
+    temp_pos = last_dot - filename;
+
+    strncpy(temp_filename, filename, temp_pos);     //Copy just the path and the base file name.
+    strcpy(temp_filename + temp_pos, ".sm");        //Add the extension to the end.
+
+    //If the event start is fully covered by the recording
+    if((file_start < de->de_start) && (file_stop > de->de_start))
+    {
+      segment_1_start = 0;
+      segment_1_stop = de->de_start - file_start;
+      tvhtrace(LS_DVR, "Writing event start marker: %"PRItime_t"/%"PRItime_t".", segment_1_start, segment_1_stop);
+    }
+
+    //If the event stop is fully covered by the recording
+    if((file_stop > de->de_stop) && (file_start < de->de_stop))
+    {
+      if(file_start > de->de_start)
+      {
+        segment_2_start = 0;
+      }
+      else
+      {
+        segment_2_start = de->de_start - file_start;
+      }
+      segment_2_stop = de->de_stop - file_start;
+      tvhtrace(LS_DVR, "Writing event stop marker: %"PRItime_t"/%"PRItime_t".", segment_2_start, segment_2_stop);
+    }
+
+    //Do we have any markers to write?
+    if(segment_1_start || segment_1_stop || segment_2_start || segment_2_stop)
+    {
+
+      //Open the SM file.
+      if (!(sm_file = tvh_fopen(temp_filename, "w")))
+      {
+        tvherror(LS_DVR, "Unable to create sm file '%s'.", temp_filename);
+        free(temp_filename);
+        return;      
+      }      
+
+      //If we have a first segment, write that marker.
+      //Consider making this a skip marker (type 3) in the future.
+      if(segment_1_start || segment_1_stop)
+      {
+        fprintf(sm_file, "%"PRItime_t" %"PRItime_t" 2\r\n", segment_1_start, segment_1_stop);
+      }
+
+      //If we have a second segment, write that marker.
+      if(segment_2_start || segment_2_stop)
+      {
+        fprintf(sm_file, "%"PRItime_t" %"PRItime_t" 2\r\n", segment_2_start, segment_2_stop);
+      }
+
+      fclose(sm_file);
+
+    }//END we got some markers to write.
+
+    free(temp_filename);    //Clean up the mess
+
+  }//END we are creating a cutpoint file.
+
+}//END dvr_create_recording_scene_markers
+
 /**
  *
  */
@@ -2930,6 +3117,9 @@ dvr_stop_recording(dvr_entry_t *de, int stopcode, int saveconf, int clone)
   // Trigger autorecord update in case of schedules limit
   if (dae && dvr_autorec_get_max_sched_count(dae) > 0)
     dvr_autorec_changed(de->de_autorec, 0);
+
+  //Create the sm file
+  dvr_create_recording_scene_markers(de);
 }
 
 
@@ -3054,6 +3244,35 @@ dvr_entry_find_by_id(int id)
   return de;
 }
 
+/**
+ * Find the earliest scheduled dvr entry
+ */
+time_t
+dvr_entry_find_earliest(void)
+{
+  time_t start;
+  time_t earliest = 0;
+  dvr_entry_t *de;
+
+  LIST_FOREACH(de, &dvrentries, de_global_link)
+  {
+    if(dvr_entry_is_upcoming(de) && de->de_enabled)
+    {
+      start = dvr_entry_get_start_time(de, 1);
+      if(earliest == 0)
+      {
+        earliest = start;
+      }
+      else if(start < earliest)
+      {
+        earliest = start;
+      }
+    }
+  }//END FOREACH
+
+  return earliest;
+
+}
 
 /**
  * Unconditionally remove an entry
@@ -3464,6 +3683,22 @@ dvr_entry_class_rating_set(void *o, const void *v)
         de->de_rating_icon_saved = strdup(rl->rl_icon);
     }
 
+    if(de->de_rating_authority_saved){
+        free(de->de_rating_authority_saved);
+    }
+
+    if(rl->rl_authority){
+        de->de_rating_authority_saved = strdup(rl->rl_authority);
+    }
+
+    if(de->de_rating_country_saved){
+        free(de->de_rating_country_saved);
+    }
+
+    if(rl->rl_country){
+        de->de_rating_country_saved = strdup(rl->rl_country);
+    }
+
     return 1;
   }//END we got an RL object.
 
@@ -3786,7 +4021,7 @@ dvr_entry_class_disp_summary_set(void *o, const void *v)
   const char *lang = idnode_lang(o);
   const char *s = "";
   v = tvh_str_default(v, "UnknownSummary");
-  if (de->de_subtitle)
+  if (de->de_summary)
     s = lang_str_get(de->de_summary, lang);
   if (strcmp(s, v)) {
     lang_str_set(&de->de_summary, v, lang);
@@ -3985,10 +4220,10 @@ dvr_entry_class_channel_icon_url_get(void *o)
 const char *
 dvr_entry_get_image(const dvr_entry_t *de)
 {
-  if (de && de->de_bcast && de->de_bcast->image)
-    return de->de_bcast->image;
   if (de && de->de_image)
     return de->de_image;
+  if (de && de->de_bcast && de->de_bcast->image)
+    return de->de_bcast->image;
   return NULL;
 }
 
@@ -4072,6 +4307,53 @@ dvr_entry_class_rating_label_get(void *o)
   }
   return &prop_ptr;
 }
+
+static const void *
+dvr_entry_class_rating_authority_get(void *o)
+{
+  dvr_entry_t *de = (dvr_entry_t *)o;
+  ratinglabel_t *rl = de->de_rating_label;
+  if (rl == NULL) {
+    prop_ptr = "";
+    if(de->de_rating_authority_saved){
+        prop_ptr = de->de_rating_authority_saved;
+    }
+  } else {
+    if(de->de_sched_state == DVR_SCHEDULED){
+      prop_ptr = rl->rl_authority;
+    }
+    else
+    {
+      prop_ptr = de->de_rating_authority_saved;
+    }
+
+  }
+  return &prop_ptr;
+}
+
+static const void *
+dvr_entry_class_rating_country_get(void *o)
+{
+  dvr_entry_t *de = (dvr_entry_t *)o;
+  ratinglabel_t *rl = de->de_rating_label;
+  if (rl == NULL) {
+    prop_ptr = "";
+    if(de->de_rating_country_saved){
+        prop_ptr = de->de_rating_country_saved;
+    }
+  } else {
+    if(de->de_sched_state == DVR_SCHEDULED){
+      prop_ptr = rl->rl_country;
+    }
+    else
+    {
+      prop_ptr = de->de_rating_country_saved;
+    }
+
+  }
+  return &prop_ptr;
+}
+
 
 static const void *
 dvr_entry_class_duplicate_get(void *o)
@@ -4790,6 +5072,22 @@ const idclass_t dvr_entry_class = {
       .off      = offsetof(dvr_entry_t, de_rating_icon_saved),
       .opts     = PO_RDONLY | PO_NOUI,
     },
+    {
+      .type     = PT_STR,
+      .id       = "rating_authority_saved",
+      .name     = N_("Saved Rating Authority"),
+      .desc     = N_("Saved parental rating authority for once recording is complete."),
+      .off      = offsetof(dvr_entry_t, de_rating_authority_saved),
+      .opts     = PO_RDONLY | PO_NOUI,
+    },
+    {
+      .type     = PT_STR,
+      .id       = "rating_country_saved",
+      .name     = N_("Saved Rating Country"),
+      .desc     = N_("Saved parental rating country for once recording is complete."),
+      .off      = offsetof(dvr_entry_t, de_rating_country_saved),
+      .opts     = PO_RDONLY | PO_NOUI,
+    },
     //This needs to go after the 'saved' properties because loading the RL object
     //can refresh the 'saved' objects for scheduled entries.
     {
@@ -4809,6 +5107,22 @@ const idclass_t dvr_entry_class = {
       .name     = N_("Rating Icon"),
       .desc     = N_("Rating Icon URL."),
       .get      = dvr_entry_class_rating_icon_url_get,
+      .opts     = PO_HIDDEN | PO_RDONLY | PO_NOSAVE | PO_NOUI,
+    },
+    {
+      .type     = PT_STR,
+      .id       = "rating_authority",
+      .name     = N_("Rating Authority"),
+      .desc     = N_("Rating Authority."),
+      .get      = dvr_entry_class_rating_authority_get,
+      .opts     = PO_HIDDEN | PO_RDONLY | PO_NOSAVE | PO_NOUI,
+    },
+    {
+      .type     = PT_STR,
+      .id       = "rating_country",
+      .name     = N_("Rating Country"),
+      .desc     = N_("Rating Country."),
+      .get      = dvr_entry_class_rating_country_get,
       .opts     = PO_HIDDEN | PO_RDONLY | PO_NOSAVE | PO_NOUI,
     },
     {
@@ -4886,6 +5200,54 @@ dvr_get_filesize(dvr_entry_t *de, int flags)
     }
 
   return first ? -1 : res;
+}
+
+/**
+ * Get the minimum start time, maximum end time and file count
+ */
+int
+dvr_get_files_details(dvr_entry_t *de, time_t *files_start, time_t *files_stop, int *files_count)
+{
+  htsmsg_field_t *f;
+  htsmsg_t *m;
+
+  int64_t start = 0;
+  int64_t stop = 0;
+
+  time_t temp_start = 0;
+  time_t temp_stop = 0;
+  int temp_count = 0;
+
+  if (de->de_files == NULL)
+    return -1;
+
+  HTSMSG_FOREACH(f, de->de_files)
+  {
+    if ((m = htsmsg_field_get_map(f)) != NULL) {
+      
+      start = htsmsg_get_s64_or_default(m, "start", 0);
+      if(temp_start == 0 || ((start < temp_start) && (start != 0)))
+      {
+        temp_start = start;
+      }
+
+      stop = htsmsg_get_s64_or_default(m, "stop", 0);
+      if(temp_stop == 0 || ((stop > temp_stop) && (stop != 0)))
+      {
+        temp_stop = stop;
+      }
+
+      temp_count++;
+
+    }//END we got a map
+  }//END FOREACH
+
+  *files_start = temp_start;
+  *files_stop = temp_stop;
+  *files_count = temp_count;
+
+  return 0;
+
 }
 
 /**

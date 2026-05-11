@@ -115,6 +115,7 @@ typedef struct dvr_config {
   int dvr_episode_in_title;
   int dvr_clean_title;
   int dvr_tag_files;
+  int dvr_create_scene_markers;
   int dvr_skip_commercials;
   int dvr_subtitle_in_title;
   int dvr_windows_compatible_filenames;
@@ -249,8 +250,10 @@ typedef struct dvr_entry {
   //may have changed, so keep an absolute copy of the values at
   //the time of recording rather than pointing to a rating label
   //object that may no longer exist many years later.
-  char *de_rating_label_saved;    /* Saved rating label for once the recording has been completed*/
-  char *de_rating_icon_saved;     /* Saved rating icon full path (not image cache) for once the recording has been completed*/
+  char *de_rating_label_saved;       /* Saved rating label for after the recording has been completed*/
+  char *de_rating_icon_saved;        /* Saved rating icon full path (not image cache) for after the recording has been completed*/
+  char *de_rating_country_saved;     /* Saved rating country code for after the recording has been completed*/
+  char *de_rating_authority_saved;   /* Saved rating authority for after the recording has been completed*/
   ratinglabel_t *de_rating_label; /* 'Live' rating label object */
 
   int de_pri;
@@ -389,6 +392,7 @@ typedef struct dvr_autorec_entry {
   char *dae_title;
   tvh_regex_t dae_title_regex;
   int dae_fulltext;
+  int dae_mergetext;
 
   uint32_t dae_content_type;
   /* These categories (mainly from xmltv) such as Cooking, Dog racing, Movie.
@@ -601,7 +605,7 @@ dvr_entry_update( dvr_entry_t *de, int enabled,
                   time_t start_extra, time_t stop_extra,
                   dvr_prio_t pri, int retention, int removal,
                   int playcount, int playposition, int age_rating,
-                  ratinglabel_t *rating_label);
+                  ratinglabel_t *rating_label, const char *comment);
 
 void dvr_destroy_by_channel(channel_t *ch, int delconf);
 
@@ -624,6 +628,8 @@ int dvr_entry_assign_broadcast(dvr_entry_t *de, epg_broadcast_t *bcast);
 
 dvr_entry_t *dvr_entry_find_by_id(int id);
 
+time_t dvr_entry_find_earliest(void);
+
 static inline dvr_entry_t *dvr_entry_find_by_uuid(const char *uuid)
   { return (dvr_entry_t*)idnode_find(uuid, &dvr_entry_class, NULL); }
 
@@ -632,6 +638,8 @@ dvr_entry_t *dvr_entry_find_by_event_fuzzy(epg_broadcast_t *e);
 const char *dvr_get_filename(dvr_entry_t *de);
 
 int64_t dvr_get_filesize(dvr_entry_t *de, int flags);
+
+int dvr_get_files_details(dvr_entry_t *de, time_t *files_start, time_t *files_stop, int *files_count);
 
 int64_t dvr_entry_claenup(dvr_entry_t *de, int64_t requiredBytes);
 
@@ -879,6 +887,7 @@ void dvr_entry_trace_time2_(const char *file, int line,
  *
  */
 
+void dvr_create_recording_scene_markers(dvr_entry_t *de);
 void dvr_init(void);
 void dvr_config_init(void);
 

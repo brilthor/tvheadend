@@ -46,6 +46,7 @@ static const struct strtab typetab[] = {
   { "s64",     PT_S64_ATOMIC },
   { "dbl",     PT_DBL },
   { "time",    PT_TIME },
+  { "int",     PT_DYN_INT },
   { "langstr", PT_LANGSTR },
   { "perm",    PT_PERM },
 };
@@ -81,9 +82,11 @@ prop_write_values
   double dbl;
    int i;
   int64_t s64;
+  int32_t s32;
   uint32_t u32, opts;
   uint16_t u16;
   time_t tm;
+  int dyn_i;
 #define PROP_UPDATE(v, t)\
   snew = &v;\
   if (!p->set && (*((t*)cur) != *((t*)snew))) {\
@@ -143,12 +146,9 @@ prop_write_values
       }
       case PT_U32: {
         if (p->intextra && INTEXTRA_IS_SPLIT(p->intextra)) {
-          char *s;
           if (!(snew = htsmsg_field_get_str(f)))
             continue;
-          u32 = atol(snew) * p->intextra;
-          if ((s = strchr(snew, '.')) != NULL)
-            u32 += (atol(s + 1) % p->intextra);
+          u32 = (uint32_t)prop_intsplit_from_str(snew, p->intextra);
         } else {
           if (htsmsg_field_get_u32(f, &u32))
             continue;
@@ -210,6 +210,13 @@ prop_write_values
           continue;
         tm = s64;
         PROP_UPDATE(tm, time_t);
+        break;
+      }
+      case PT_DYN_INT: {
+        if (htsmsg_field_get_s32(f, &s32))
+          continue;
+        dyn_i = s32;
+        PROP_UPDATE(dyn_i, int);
         break;
       }
       case PT_LANGSTR: {
@@ -349,6 +356,9 @@ prop_read_value
     case PT_TIME:
       htsmsg_add_s64(m, name, *(time_t *)val);
       break;
+    case PT_DYN_INT:
+      htsmsg_add_s32(m, name, *(int *)val);
+      break;
     case PT_LANGSTR:
       lang_str_serialize(*(lang_str_t **)val, m, name);
       break;
@@ -480,6 +490,9 @@ prop_serialize_value
         break;
       case PT_TIME:
         htsmsg_add_s64(m, "default", pl->def.tm);
+        break;
+      case PT_DYN_INT:
+        htsmsg_add_s32(m, "default", pl->def.dyn_i());
         break;
       case PT_LANGSTR:
         /* TODO? */

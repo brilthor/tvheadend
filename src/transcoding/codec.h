@@ -92,9 +92,6 @@ struct tvh_codec_profile {
     double bit_rate;
     double qscale;
     int profile;
-    int low_power;
-    int filter_hw_denoise;
-    int filter_hw_sharpness;
     char *device; // for hardware acceleration
     LIST_ENTRY(tvh_codec_profile) link;
 };
@@ -136,6 +133,9 @@ tvh_codec_profile_video_destroy(TVHCodecProfile *_self);
 int
 tvh_codec_profile_video_get_hwaccel(TVHCodecProfile *self);
 
+int
+tvh_codec_profile_video_get_hwaccel_details(TVHCodecProfile *self);
+
 const enum AVPixelFormat *
 tvh_codec_profile_video_get_pix_fmts(TVHCodecProfile *self);
 
@@ -153,8 +153,13 @@ tvh_codec_profile_audio_get_sample_fmts(TVHCodecProfile *self);
 const int *
 tvh_codec_profile_audio_get_sample_rates(TVHCodecProfile *self);
 
+#if LIBAVCODEC_VERSION_MAJOR > 59
+const AVChannelLayout *
+tvh_codec_profile_audio_get_channel_layouts(TVHCodecProfile *self);
+#else
 const uint64_t *
 tvh_codec_profile_audio_get_channel_layouts(TVHCodecProfile *self);
+#endif
 
 
 /* module level ============================================================= */
@@ -166,7 +171,11 @@ htsmsg_t *
 codec_get_profiles_list(enum AVMediaType media_type);
 
 void
+#if ENABLE_VAAPI
+codec_init(int vainfo_probe_enabled);
+#else
 codec_init(void);
+#endif
 
 void
 codec_done(void);

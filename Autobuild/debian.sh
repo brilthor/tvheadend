@@ -31,6 +31,7 @@ build()
     export JOBSARGS
     export JARGS
     export AUTOBUILD_CONFIGURE_EXTRA
+    export EXTRA_X265_CMAKE_OPTS
 
     if ccache=$(which ccache); then
         echo "Using ccache"
@@ -42,7 +43,26 @@ build()
 
     export USE_CCACHE
 
-    dpkg-buildpackage -b -us -uc
+    # Try parallel build first, fallback to single-threaded if it fails
+    if ! dpkg-buildpackage -b -us -uc; then
+        echo "PARALLEL BUILD FAILED, DOING SINGLE THREADED BUILD"
+        # Backup original parallel settings
+        ORIGINAL_JARGS="$JARGS"
+        ORIGINAL_JOBSARGS="$JOBSARGS"
+        # Set single-threaded
+        export JARGS="-j1"
+        export JOBSARGS="--jobs=1"
+        # Retry build
+        if ! dpkg-buildpackage -b -us -uc; then
+            # Restore original settings before exiting
+            export JARGS="$ORIGINAL_JARGS"
+            export JOBSARGS="$ORIGINAL_JOBSARGS"
+            exit 1
+        fi
+        # Restore original settings
+        export JARGS="$ORIGINAL_JARGS"
+        export JOBSARGS="$ORIGINAL_JOBSARGS"
+    fi
 }
 
 clean() 

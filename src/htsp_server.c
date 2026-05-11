@@ -51,7 +51,7 @@
 
 static void *htsp_server, *htsp_server_2;
 
-#define HTSP_PROTO_VERSION 37
+#define HTSP_PROTO_VERSION 44
 
 #define HTSP_ASYNC_OFF  0x00
 #define HTSP_ASYNC_ON   0x01
@@ -607,10 +607,14 @@ htsp_serierec_convert(htsp_connection_t *htsp, htsmsg_t *in, channel_t *ch, int 
       htsmsg_add_u32(conf, "maxduration", !retval ? u32 : 0);  // 0 = any
     if (!(retval = htsmsg_get_u32(in, "fulltext", &u32)) || add)
       htsmsg_add_u32(conf, "fulltext", !retval ? u32 : 0);     // 0 = off
+    if (!(retval = htsmsg_get_u32(in, "mergetext", &u32)) || add)
+      htsmsg_add_u32(conf, "mergetext", !retval ? u32 : 0);     // 0 = off
     if (!(retval = htsmsg_get_u32(in, "dupDetect", &u32)) || add)
       htsmsg_add_u32(conf, "record", !retval ? u32 : DVR_AUTOREC_RECORD_ALL);
     if (!(retval = htsmsg_get_u32(in, "maxCount", &u32)) || add)
       htsmsg_add_u32(conf, "maxcount", !retval ? u32 : 0);     // 0 = unlimited
+    if (!(retval = htsmsg_get_u32(in, "broadcastType", &u32)) || add)
+      htsmsg_add_u32(conf, "btype", !retval ? u32 : 0); // 0 = all
     if (!(retval = htsmsg_get_s64(in, "startExtra", &s64)) || add)
       htsmsg_add_s64(conf, "start_extra", !retval ? (s64 < 0 ? 0 : s64)  : 0); // 0 = dvr config
     if (!(retval = htsmsg_get_s64(in, "stopExtra", &s64)) || add)
@@ -867,6 +871,8 @@ htsp_build_channel(channel_t *ch, const char *method, htsp_connection_t *htsp)
   htsmsg_t *services = htsmsg_create_list();
 
   htsmsg_add_u32(out, "channelId", channel_get_id(ch));
+  htsmsg_add_str(out, "channelIdStr", idnode_uuid_as_str(&ch->ch_id, buf));
+  
   htsmsg_add_u32(out, "channelNumber", channel_get_major(chnum));
   if (channel_get_minor(chnum))
     htsmsg_add_u32(out, "channelNumberMinor", channel_get_minor(chnum));
@@ -906,6 +912,9 @@ htsp_build_channel(channel_t *ch, const char *method, htsp_connection_t *htsp)
     if (t->s_hbbtv)
       htsmsg_add_msg(svcmsg, "hbbtv", htsmsg_copy(t->s_hbbtv));
 
+    /* Provider */
+    htsmsg_add_str2(svcmsg, "providername", t->s_provider_name(t));
+
     htsmsg_add_msg(services, NULL, svcmsg);
   }
 
@@ -929,6 +938,8 @@ htsp_build_tag(htsp_connection_t *htsp, channel_tag_t *ct, const char *method, i
   htsmsg_t *members = include_channels ? htsmsg_create_list() : NULL;
 
   htsmsg_add_u32(out, "tagId", htsp_channel_tag_get_identifier(ct));
+  htsmsg_add_str(out, "tagIdStr", idnode_uuid_as_str(&ct->ct_id, buf));
+
   htsmsg_add_u32(out, "tagIndex", ct->ct_index);
 
   htsmsg_add_str(out, "tagName", ct->ct_name);
@@ -964,6 +975,7 @@ htsp_build_dvrentry(htsp_connection_t *htsp, dvr_entry_t *de, const char *method
   const char *str;
 
   htsmsg_add_u32(out, "id", idnode_get_short_uuid(&de->de_id));
+  htsmsg_add_str(out, "idStr", idnode_uuid_as_str(&de->de_id, ubuf));
 
   if (!statsonly) {
     htsmsg_add_u32(out, "enabled", de->de_enabled >= 1 ? 1 : 0);
@@ -1000,57 +1012,66 @@ htsp_build_dvrentry(htsp_connection_t *htsp, dvr_entry_t *de, const char *method
       u32 = DVR_PRIO_NORMAL;
     htsmsg_add_u32(out, "priority",    u32);
     htsmsg_add_u32(out, "contentType", de->de_content_type);
+    htsmsg_add_u32(out, "ageRating", de->de_age_rating);
 
-    //To not risk breaking older clients, only
-    //provide the 'age rating' via HTSP if the requested
-    //API version if greater than 36.
-    if (htsp->htsp_version > 36)
-    {
-      //Having the age in the DVR entry is new, that is why
-      //it is processed inside the version test.
-      htsmsg_add_u32(out, "ageRating", de->de_age_rating);
+    //Only add the rating label fields if rating labels are enabled.
+    if(epggrab_conf.epgdb_processparentallabels){
+      //If this is still scheduled (in the future) then send the current values,
+      //if not, send the 'saved' values.
 
-      //Only go on to add the rating label stuff if
-      //rating labels are enabled.
-      if(epggrab_conf.epgdb_processparentallabels){
-        //If this is still scheduled (in the future) then send the current values,
-        //if not, send the 'saved' values.
-
-        if(de->de_sched_state == DVR_SCHEDULED){
-          if(de->de_rating_label){
-            if(de->de_rating_label->rl_display_label){
-              htsmsg_add_str(out, "ratingLabel", de->de_rating_label->rl_display_label);
-            }
-            //If the rating icon is not null.
-            if(de->de_rating_label->rl_icon){
-              str = de->de_rating_label->rl_icon;
-              if (!strempty(str)) {
-                str = imagecache_get_propstr(str, buf, sizeof(buf));
-                if (str)
-                  htsmsg_add_str(out, "ratingIcon", str);
-              }//END got an imagecache location
-            }//END icon not null
+      if(de->de_sched_state == DVR_SCHEDULED){
+        if(de->de_rating_label){
+          if(de->de_rating_label->rl_display_label){
+            htsmsg_add_str(out, "ratingLabel", de->de_rating_label->rl_display_label);
           }
-        }
-        else
-        {
+          //If the rating icon is not null.
+          if(de->de_rating_label->rl_icon){
+            str = de->de_rating_label->rl_icon;
+            if (!strempty(str)) {
+              str = imagecache_get_propstr(str, buf, sizeof(buf));
+              if (str)
+                htsmsg_add_str(out, "ratingIcon", str);
+            }//END got an imagecache location
+          }//END icon not null
+
+          //The authority and country are added for Kodi's parentalRatingSource field.
+          //Kodi looks for the authority first and if that is not present, then it uses the country.
+          //There could be no label, but there could be an age.  The authority &
+          //country could still be useful.
+          if(de->de_rating_label->rl_authority){
+            htsmsg_add_str(out, "ratingAuthority", de->de_rating_label->rl_authority);
+          }//END authority saved not null
+
+          if(de->de_rating_label->rl_country){
+            htsmsg_add_str(out, "ratingCountry", de->de_rating_label->rl_country);
+          }//END country saved not null
+        }//END rating label not null
+      }//END this is a scheduled recording.
+      else
+      {
+        if(de->de_rating_label_saved){
           if(de->de_rating_label_saved){
-            if(de->de_rating_label_saved){
-              htsmsg_add_str(out, "ratingLabel", de->de_rating_label_saved);
-            }
-            if(de->de_rating_icon_saved){
-              str = de->de_rating_icon_saved;
-              if (!strempty(str)) {
-                str = imagecache_get_propstr(str, buf, sizeof(buf));
-                if (str)
-                  htsmsg_add_str(out, "ratingIcon", str);
-              }//END got an imagecache location
-            }//END icon not null
+            htsmsg_add_str(out, "ratingLabel", de->de_rating_label_saved);
           }
-        }
-      }//END processing rating labels is enabled
-    }
+          if(de->de_rating_icon_saved){
+            str = de->de_rating_icon_saved;
+            if (!strempty(str)) {
+              str = imagecache_get_propstr(str, buf, sizeof(buf));
+              if (str)
+                htsmsg_add_str(out, "ratingIcon", str);
+            }//END got an imagecache location
+          }//END icon not null
 
+          if(de->de_rating_authority_saved){
+            htsmsg_add_str(out, "ratingAuthority", de->de_rating_authority_saved);
+          }//END authority saved not null
+
+          if(de->de_rating_country_saved){
+            htsmsg_add_str(out, "ratingCountry", de->de_rating_country_saved);
+          }//END country saved not null
+        }//END got saved rating label
+      }//END this is not a scheduled recording.
+    }//END processing rating labels is enabled
 
     if (de->de_sched_state == DVR_RECORDING || de->de_sched_state == DVR_COMPLETED) {
       htsmsg_add_u32(out, "playcount",    de->de_playcount);
@@ -1128,6 +1149,9 @@ htsp_build_dvrentry(htsp_connection_t *htsp, dvr_entry_t *de, const char *method
     if(last && de->de_config)
       if ((p = tvh_strbegins(last, de->de_config->dvr_storage)))
         htsmsg_add_str(out, "path", p);
+
+    if (de->de_config)
+      htsmsg_add_str(out, "configId", idnode_uuid_as_str(&de->de_config->dvr_id, ubuf));
   }
 
   switch(de->de_sched_state) {
@@ -1219,10 +1243,13 @@ htsp_build_autorecentry(htsp_connection_t *htsp, dvr_autorec_entry_t *dae, const
   htsmsg_add_s64(out, "stopExtra",   dvr_autorec_get_extra_time_post(dae));
   htsmsg_add_u32(out, "dupDetect",   dae->dae_record);
   htsmsg_add_u32(out, "maxCount",    dae->dae_max_count);
+  htsmsg_add_u32(out, "broadcastType", dae->dae_btype);
+  htsmsg_add_str2(out, "comment",    dae->dae_comment);
 
   if(dae->dae_title) {
     htsmsg_add_str(out, "title",     dae->dae_title);
     htsmsg_add_u32(out, "fulltext",  dae->dae_fulltext >= 1 ? 1 : 0);
+    htsmsg_add_u32(out, "mergetext", dae->dae_mergetext >= 1 ? 1 : 0);
   }
   htsmsg_add_str2(out, "name",       dae->dae_name);
   if(dae->dae_directory)
@@ -1233,6 +1260,9 @@ htsp_build_autorecentry(htsp_connection_t *htsp, dvr_autorec_entry_t *dae, const
     htsmsg_add_u32(out, "channel",   channel_get_id(dae->dae_channel));
   if (dae->dae_serieslink_uri)
     htsmsg_add_str(out, "serieslinkUri", dae->dae_serieslink_uri);
+  if (dae->dae_config)
+     htsmsg_add_str(out, "configId", idnode_uuid_as_str(&dae->dae_config->dvr_id, ubuf));
+
   htsmsg_add_str(out, "method", method);
 
   return out;
@@ -1261,6 +1291,7 @@ htsp_build_timerecentry(htsp_connection_t *htsp, dvr_timerec_entry_t *dte, const
   htsmsg_add_u32(out, "priority",    dte->dte_pri);
   htsmsg_add_s32(out, "start",       dte->dte_start);
   htsmsg_add_s32(out, "stop",        dte->dte_stop);
+  htsmsg_add_str2(out, "comment",    dte->dte_comment);
 
   if(dte->dte_title)
     htsmsg_add_str(out, "title",     dte->dte_title);
@@ -1272,6 +1303,8 @@ htsp_build_timerecentry(htsp_connection_t *htsp, dvr_timerec_entry_t *dte, const
   htsmsg_add_str2(out, "creator",    dte->dte_creator);
   if(dte->dte_channel)
     htsmsg_add_u32(out, "channel",   channel_get_id(dte->dte_channel));
+  if (dte->dte_config)
+    htsmsg_add_str(out, "configId", idnode_uuid_as_str(&dte->dte_config->dvr_id, ubuf));
 
   htsmsg_add_str(out, "method", method);
 
@@ -1360,37 +1393,39 @@ htsp_build_event
   if (e->age_rating){
     htsmsg_add_u32(out, "ageRating", e->age_rating);
   }
-  //To not risk breaking older clients, only
-  //provide the 'rating label' & 'rating icon' via HTSP if the requested
-  //version if greater than 36.
-  //Because this is the EPG, do not restrict the ageRating based on version,
-  //that field was added in a very early version.
-  if (htsp->htsp_version > 36)
+
+  //If processing parental labels is enabled
+  if(epggrab_conf.epgdb_processparentallabels)
   {
-    //If we are processing parental labels
-    if(epggrab_conf.epgdb_processparentallabels)
-    {
-      //If this event had a label pointer that is not null
-      if (e->rating_label)
-        {
-          //If there is a 'display label'
-          //Do not fall-back to the 'label' because the 'display label'
-          //may be intentionally null.
-          if(e->rating_label->rl_display_label){
-            htsmsg_add_str(out, "ratingLabel", e->rating_label->rl_display_label);
-          }
-          //If the rating icon is not null.
-          if(e->rating_label->rl_icon){
-            str = e->rating_label->rl_icon;
-            if (!strempty(str)) {
-              str = imagecache_get_propstr(str, buf, sizeof(buf));
-              if (str)
-                htsmsg_add_str(out, "ratingIcon", str);
-            }//END got an imagecache location
-          }//END icon not null
-        }//END rating label not null
-    }//END parental labels enabled.
-  }//END HTSP version check
+    //If this event had a label pointer that is not null
+    if (e->rating_label)
+      {
+        //If there is a 'display label'
+        //Do not fall-back to the 'label' because the 'display label'
+        //may be intentionally null.
+        if(e->rating_label->rl_display_label){
+          htsmsg_add_str(out, "ratingLabel", e->rating_label->rl_display_label);
+        }
+        //If the rating icon is not null.
+        if(e->rating_label->rl_icon){
+          str = e->rating_label->rl_icon;
+          if (!strempty(str)) {
+            str = imagecache_get_propstr(str, buf, sizeof(buf));
+            if (str)
+              htsmsg_add_str(out, "ratingIcon", str);
+          }//END got an imagecache location
+        }//END icon not null
+
+        if(e->rating_label->rl_authority){
+          htsmsg_add_str(out, "ratingAuthority", e->rating_label->rl_authority);
+        }//END authority saved not null
+
+        if(e->rating_label->rl_country){
+          htsmsg_add_str(out, "ratingCountry", e->rating_label->rl_country);
+        }//END country saved not null
+
+      }//END rating label not null
+  }//END parental labels enabled.
 
   if (e->star_rating)
     htsmsg_add_u32(out, "starRating", e->star_rating);
@@ -1398,6 +1433,8 @@ htsp_build_event
     htsmsg_add_u32(out, "copyrightYear", e->copyright_year);
   if (e->first_aired)
     htsmsg_add_s64(out, "firstAired", e->first_aired);
+  if (e->is_new)
+    htsmsg_add_u32(out, "isNew", e->is_new);
   epg_broadcast_get_epnum(e, &epnum);
   htsp_serialize_epnum(out, &epnum, NULL);
   if (!strempty(e->image))
@@ -1845,20 +1882,27 @@ htsp_method_epgQuery(htsp_connection_t *htsp, htsmsg_t *in)
 
   if(htsmsg_get_bool_or_default(in, "fulltext", 0))
     eq.fulltext = 1;
+  if(htsmsg_get_bool_or_default(in, "mergetext", 0))
+    eq.mergetext = 1;
+
   eq.stitle = strdup(query);
 
   /* Optional */
   if(!(htsmsg_get_u32(in, "channelId", &u32))) {
-    if (!(ch = channel_find_by_id(u32)))
+    if (!(ch = channel_find_by_id(u32))) {
+	  epg_query_free(&eq);
       return htsp_error(htsp, N_("Channel does not exist"));
-    else
+	} else {
       eq.channel = strdup(idnode_uuid_as_str(&ch->ch_id, ubuf));
+	}
   }
   if(!(htsmsg_get_u32(in, "tagId", &u32))) {
-    if (!(ct = htsp_channel_tag_find_by_id(htsp, u32)))
+    if (!(ct = htsp_channel_tag_find_by_id(htsp, u32))) {
+	  epg_query_free(&eq);
       return htsp_error(htsp, N_("Channel tag does not exist"));
-    else
+	} else {
       eq.channel_tag = strdup(idnode_uuid_as_str(&ct->ct_id, ubuf));
+	}
   }
   if (!htsmsg_get_u32(in, "contentType", &u32)) {
     if(htsp->htsp_version < 6) u32 <<= 4;
@@ -1878,8 +1922,10 @@ htsp_method_epgQuery(htsp_connection_t *htsp, htsmsg_t *in)
   tvhtrace(LS_HTSP, "min_duration %d and max_duration %d", min_duration, max_duration);
 
   /* Check access */
-  if (ch && !htsp_user_access_channel(htsp, ch))
+  if (ch && !htsp_user_access_channel(htsp, ch)) {
+    epg_query_free(&eq);
     return htsp_error(htsp, N_("User does not have access"));
+  }
 
   /* Query */
   epg_query(&eq, htsp->htsp_granted_access);
@@ -2010,13 +2056,12 @@ htsp_method_addDvrEntry(htsp_connection_t *htsp, htsmsg_t *in)
   conf = htsmsg_create_map();
   htsmsg_copy_field(conf, "enabled", in, NULL);
   s = htsmsg_get_str(in, "configName");
-  if (s) {
-    dvr_conf = dvr_config_find_by_uuid(s);
-    if (dvr_conf == NULL)
-      dvr_conf = dvr_config_find_by_name(s);
+  dvr_conf = dvr_config_find_by_list(htsp->htsp_granted_access->aa_dvrcfgs, s);
     if (dvr_conf)
+  {
       htsmsg_add_uuid(conf, "config_name", &dvr_conf->dvr_id.in_uuid);
   }
+  
   htsmsg_copy_field(conf, "start_extra", in, "startExtra");
   htsmsg_copy_field(conf, "stop_extra", in, "stopExtra");
   htsmsg_copy_field(conf, "pri", in, "priority");
@@ -2129,7 +2174,7 @@ htsp_method_updateDvrEntry(htsp_connection_t *htsp, htsmsg_t *in)
   uint32_t u32;
   dvr_entry_t *de;
   time_t start, stop, start_extra, stop_extra, priority;
-  const char *dvr_config_name, *title, *subtitle, *summary, *desc, *lang;
+  const char *dvr_config_name, *title, *subtitle, *summary, *desc, *lang, *comment;
   channel_t *channel = NULL;
   int enabled, retention, removal, playcount = -1, playposition = -1;
   int age_rating;
@@ -2164,6 +2209,7 @@ htsp_method_updateDvrEntry(htsp_connection_t *htsp, htsmsg_t *in)
   summary     = htsmsg_get_str(in, "summary");
   desc        = htsmsg_get_str(in, "description");
   lang        = htsmsg_get_str(in, "language") ?: htsp->htsp_language;
+  comment     = htsmsg_get_str(in, "comment");
 
   if(!htsmsg_get_u32(in, "playcount", &u32)) {
     if (u32 > INT_MAX)
@@ -2192,7 +2238,7 @@ htsp_method_updateDvrEntry(htsp_connection_t *htsp, htsmsg_t *in)
   de = dvr_entry_update(de, enabled, dvr_config_name, channel, title, subtitle,
                         summary, desc, lang, start, stop, start_extra, stop_extra,
                         priority, retention, removal, playcount, playposition,
-                        age_rating, rating_label);
+                        age_rating, rating_label, comment);
 
   return htsp_success();
 }
@@ -2614,14 +2660,10 @@ htsp_method_subscribe(htsp_connection_t *htsp, htsmsg_t *in)
   profile_id = htsmsg_get_str(in, "profile");
 
 #if ENABLE_TIMESHIFT
-  if(ch->ch_remote_timeshift) {
-    timeshiftPeriod = ~0;
-  } else {
-    if (timeshift_conf.enabled) {
-      timeshiftPeriod = htsmsg_get_u32_or_default(in, "timeshiftPeriod", 0);
-      if (!timeshift_conf.unlimited_period)
-        timeshiftPeriod = MIN(timeshiftPeriod, timeshift_conf.max_period * 60);
-    }
+  if (timeshift_conf.enabled) {
+    timeshiftPeriod = htsmsg_get_u32_or_default(in, "timeshiftPeriod", 0);
+    if (!timeshift_conf.unlimited_period)
+      timeshiftPeriod = MIN(timeshiftPeriod, timeshift_conf.max_period * 60);
   }
 #endif
 
@@ -2639,24 +2681,19 @@ htsp_method_subscribe(htsp_connection_t *htsp, htsmsg_t *in)
   streaming_target_init(&hs->hs_input, &htsp_streaming_input_ops, hs, 0);
 
 #if ENABLE_TIMESHIFT
-  if (ch->ch_remote_timeshift) {
-    tvhdebug(LS_HTSP, "using remote timeshift (RTSP)");
-  } else {
-    if (timeshiftPeriod != 0) {
-      if (timeshiftPeriod == ~0)
-        tvhdebug(LS_HTSP, "using timeshift buffer (unlimited)");
-      else
-        tvhdebug(LS_HTSP, "using timeshift buffer (%u mins)",
-            timeshiftPeriod / 60);
-    }
+  if (timeshiftPeriod != 0) {
+    if (timeshiftPeriod == ~0)
+      tvhdebug(LS_HTSP, "using timeshift buffer (unlimited)");
+    else
+      tvhdebug(LS_HTSP, "using timeshift buffer (%u mins)",
+          timeshiftPeriod / 60);
   }
 #endif
 
   pro = profile_find_by_list(htsp->htsp_granted_access->aa_profiles, profile_id,
                              "htsp", SUBSCRIPTION_PACKET | SUBSCRIPTION_HTSP);
   profile_chain_init(&hs->hs_prch, pro, ch, 1);
-  if (profile_chain_work(&hs->hs_prch, &hs->hs_input, timeshiftPeriod, ch->ch_remote_timeshift ?
-      PROFILE_WORK_REMOTE_TS : PROFILE_WORK_NONE)) {
+  if (profile_chain_work(&hs->hs_prch, &hs->hs_input, timeshiftPeriod)) {
     tvherror(LS_HTSP, "unable to create profile chain '%s'", profile_get_name(pro));
     profile_chain_close(&hs->hs_prch);
     free(hs);
@@ -2680,12 +2717,8 @@ htsp_method_subscribe(htsp_connection_t *htsp, htsmsg_t *in)
     htsmsg_add_u32(rep, "weight", hs->hs_s->ths_weight >= 0 ? hs->hs_s->ths_weight : 0);
 
 #if ENABLE_TIMESHIFT
-  if (ch->ch_remote_timeshift) {
+  if (timeshiftPeriod)
     htsmsg_add_u32(rep, "timeshiftPeriod", timeshiftPeriod);
-  } else {
-    if (timeshiftPeriod)
-      htsmsg_add_u32(rep, "timeshiftPeriod", timeshiftPeriod);
-  }
 #endif
 
   htsp_reply(htsp, in, rep);
@@ -4464,9 +4497,13 @@ htsp_subscription_signal_status(htsp_subscription_t *hs, signal_status_t *sig)
   if (!htsp_anonymize(hs->hs_htsp)) {
     htsmsg_add_str(m, "feStatus",   sig->status_text);
     if((sig->snr != -2) && (sig->snr_scale == SIGNAL_STATUS_SCALE_RELATIVE))
-      htsmsg_add_u32(m, "feSNR",    sig->snr);
+      htsmsg_add_u32(m, "feSNR", sig->snr);
+    else if((sig->snr != -2) && (sig->snr_scale == SIGNAL_STATUS_SCALE_DECIBEL))
+      htsmsg_add_s64(m, "feAbsoluteSNR", sig->snr);
     if((sig->signal != -2) && (sig->signal_scale == SIGNAL_STATUS_SCALE_RELATIVE))
       htsmsg_add_u32(m, "feSignal", sig->signal);
+    else if((sig->signal != -2) && (sig->signal_scale == SIGNAL_STATUS_SCALE_DECIBEL))
+      htsmsg_add_s64(m, "feAbsoluteSignal", sig->signal);
     if(sig->ber != -2)
       htsmsg_add_u32(m, "feBER",    sig->ber);
     if(sig->unc != -2)
@@ -4588,7 +4625,7 @@ htsp_streaming_input(void *opaque, streaming_message_t *sm)
       tvhdebug(LS_HTSP, "%s - first packet", hs->hs_htsp->htsp_logname);
     hs->hs_first = 1;
     htsp_stream_deliver(hs, sm->sm_data);
-    // reference is transfered
+    // reference is transferred
     sm->sm_data = NULL;
     break;
 

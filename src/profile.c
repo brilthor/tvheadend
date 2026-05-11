@@ -361,6 +361,17 @@ const idclass_t profile_class =
     },
     {
       .type     = PT_INT,
+      .id       = "timeout_start",
+      .name     = N_("Data start timeout (sec) (0=default)"),
+      .desc     = N_("The number of seconds to wait for data "
+                     "when stream is starting."),
+      .off      = offsetof(profile_t, pro_timeout_start),
+      .opts     = PO_EXPERT,
+      .def.i    = 0,
+      .group    = 1
+    },
+    {
+      .type     = PT_INT,
       .id       = "priority",
       .name     = N_("Default priority"),
       .desc     = N_("If no specific priority was requested. This "
@@ -1038,11 +1049,11 @@ profile_chain_init(profile_chain_t *prch, profile_t *pro, void *id, int queue)
  */
 int
 profile_chain_work(profile_chain_t *prch, struct streaming_target *dst,
-                   uint32_t timeshift_period, profile_work_flags_t flags)
+                   uint32_t timeshift_period)
 {
   profile_t *pro = prch->prch_pro;
   if (pro && pro->pro_work)
-    return pro->pro_work(prch, dst, timeshift_period, flags);
+    return pro->pro_work(prch, dst, timeshift_period);
   return -1;
 }
 
@@ -1151,12 +1162,6 @@ profile_chain_close(profile_chain_t *prch)
     timeshift_destroy(prch->prch_timeshift);
     prch->prch_timeshift = NULL;
   }
-#if ENABLE_IPTV
-  if(prch->prch_rtsp) {
-    rtsp_st_destroy(prch->prch_rtsp);
-    prch->prch_rtsp = NULL;
-  }
-#endif
 #endif
   if (prch->prch_gh) {
     globalheaders_destroy(prch->prch_gh);
@@ -1208,7 +1213,7 @@ const idclass_t profile_htsp_class =
 static int
 profile_htsp_work(profile_chain_t *prch,
                   streaming_target_t *dst,
-                  uint32_t timeshift_period, profile_work_flags_t flags)
+                  uint32_t timeshift_period)
 {
   profile_sharer_t *prsh;
 
@@ -1221,13 +1226,8 @@ profile_htsp_work(profile_chain_t *prch,
   prch->prch_share = prsh->prsh_tsfix;
 
 #if ENABLE_TIMESHIFT
-#if ENABLE_IPTV
-  if (flags & PROFILE_WORK_REMOTE_TS)
-    dst = prch->prch_rtsp = rtsp_st_create(dst, prch);
-  else
-#endif
-    if (timeshift_period > 0)
-      dst = prch->prch_timeshift = timeshift_create(dst, timeshift_period);
+  if (timeshift_period > 0)
+    dst = prch->prch_timeshift = timeshift_create(dst, timeshift_period);
 #endif
 
   dst = prch->prch_gh = globalheaders_create(dst);
@@ -1995,7 +1995,7 @@ profile_audio_open(profile_chain_t *prch,
   prch->prch_flags = SUBSCRIPTION_PACKET;
   prch->prch_sq.sq_maxsize = qsize;
 
-  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0, 0);
+  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0);
   if (r) {
     profile_chain_close(prch);
     return r;
@@ -2063,7 +2063,7 @@ profile_libav_mpegts_open(profile_chain_t *prch,
   prch->prch_flags = SUBSCRIPTION_PACKET;
   prch->prch_sq.sq_maxsize = qsize;
 
-  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0, 0);
+  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0);
   if (r) {
     profile_chain_close(prch);
     return r;
@@ -2154,7 +2154,7 @@ profile_libav_matroska_open(profile_chain_t *prch,
   prch->prch_flags = SUBSCRIPTION_PACKET;
   prch->prch_sq.sq_maxsize = qsize;
 
-  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0, 0);
+  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0);
   if (r) {
     profile_chain_close(prch);
     return r;
@@ -2217,7 +2217,7 @@ profile_libav_mp4_open(profile_chain_t *prch,
   prch->prch_flags = SUBSCRIPTION_PACKET;
   prch->prch_sq.sq_maxsize = qsize;
 
-  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0, 0);
+  r = profile_htsp_work(prch, &prch->prch_sq.sq_st, 0);
   if (r) {
     profile_chain_close(prch);
     return r;
@@ -2243,6 +2243,11 @@ profile_libav_mp4_builder(void)
 typedef struct profile_transcode {
   profile_t;
   int   pro_mc;
+#if ENABLE_LIBAV
+  uint16_t pro_rewrite_sid;
+  int   pro_rewrite_pmt;
+  int   pro_rewrite_nit;
+#endif
   char *pro_vcodec;
   char *pro_src_vcodec;
   char *pro_acodec;
@@ -2251,6 +2256,48 @@ typedef struct profile_transcode {
   char *pro_src_scodec;
 } profile_transcode_t;
 
+#if ENABLE_LIBAV
+static int
+profile_transcode_rewrite_sid_set (void *in, const void *v)
+{
+  profile_transcode_t *pro = (profile_transcode_t *)in;
+  const uint16_t *val = v;
+  if (*val != pro->pro_rewrite_sid) {
+    if (*val > 0) {
+      pro->pro_rewrite_pmt = 1;
+      pro->pro_rewrite_nit = 1;
+    }
+    pro->pro_rewrite_sid = *val;
+    return 1;
+  }
+  return 0;
+}
+
+static int
+profile_transcode_int_set (void *in, const void *v, int *prop)
+{
+  profile_transcode_t *pro = (profile_transcode_t *)in;
+  int val = *(int *)v;
+  if (pro->pro_rewrite_sid > 0) val = 1;
+  if (val != *prop) {
+    *prop = val;
+    return 1;
+  }
+  return 0;
+}
+
+static int
+profile_transcode_rewrite_pmt_set (void *in, const void *v)
+{
+  return profile_transcode_int_set(in, v, &((profile_transcode_t *)in)->pro_rewrite_pmt);
+}
+
+static int
+profile_transcode_rewrite_nit_set (void *in, const void *v)
+{
+  return profile_transcode_int_set(in, v, &((profile_transcode_t *)in)->pro_rewrite_nit);
+}
+#endif
 
 static htsmsg_t *
 profile_class_mc_list ( void *o, const char *lang )
@@ -2459,6 +2506,12 @@ const idclass_t profile_transcode_class =
       .name   = N_("Transcoding Settings"),
       .number = 2,
     },
+#if ENABLE_LIBAV
+    {
+      .name   = N_("Rewrite MPEG-TS SI Table(s) Settings"),
+      .number = 3,
+    },
+#endif
     {}
   },
   .ic_properties = (const property_t[]){
@@ -2473,6 +2526,51 @@ const idclass_t profile_transcode_class =
       .opts     = PO_DOC_NLIST,
       .group    = 1
     },
+#if ENABLE_LIBAV
+    {
+      .type     = PT_U16,
+      .id       = "sid",
+      .name     = N_("Rewrite Service ID"),
+      .desc     = N_("Rewrite service identifier (SID) using the specified "
+                     "value (usually 1). Zero means no rewrite; preserving "
+                     "MPEG-TS original network and transport stream IDs"),
+      .off      = offsetof(profile_transcode_t, pro_rewrite_sid),
+      .set      = profile_transcode_rewrite_sid_set,
+      .opts     = PO_EXPERT,
+      .def.i    = 1,
+      .group    = 3
+    },
+    {
+      .type     = PT_BOOL,
+      .id       = "rewrite_pmt",
+      .name     = N_("Rewrite PMT"),
+      .desc     = N_("Rewrite PMT (Program Map Table) packets to only "
+                     "include information about the currently-streamed "
+                     "service. "
+                     "Rewrite can be unset only if 'Rewrite Service ID' "
+                     "is set to zero."),
+      .off      = offsetof(profile_transcode_t, pro_rewrite_pmt),
+      .set      = profile_transcode_rewrite_pmt_set,
+      .opts     = PO_EXPERT,
+      .def.i    = 1,
+      .group    = 3
+    },
+    {
+      .type     = PT_BOOL,
+      .id       = "rewrite_nit",
+      .name     = N_("Rewrite NIT"),
+      .desc     = N_("Rewrite NIT (Network Information Table) packets "
+                     "to only include information about the currently-"
+                     "streamed service. "
+                     "Rewrite can be unset only if 'Rewrite Service ID' "
+                     "is set to zero."),
+      .off      = offsetof(profile_transcode_t, pro_rewrite_nit),
+      .set      = profile_transcode_rewrite_nit_set,
+      .opts     = PO_EXPERT,
+      .def.i    = 1,
+      .group    = 3
+    },
+#endif
     {
       .type     = PT_STR,
       .id       = "pro_vcodec",
@@ -2575,7 +2673,7 @@ profile_transcode_can_share(profile_chain_t *prch,
 static int
 profile_transcode_work(profile_chain_t *prch,
                        streaming_target_t *dst,
-                       uint32_t timeshift_period, profile_work_flags_t flags)
+                       uint32_t timeshift_period)
 {
   profile_sharer_t *prsh;
   profile_transcode_t *pro = (profile_transcode_t *)prch->prch_pro;
@@ -2664,6 +2762,11 @@ profile_transcode_reopen(profile_chain_t *prch,
     if (!profile_transcode_mc_valid(c.m_type))
       c.m_type = MC_MATROSKA;
   }
+  #if ENABLE_LIBAV
+  c.u.transcode.m_rewrite_sid = pro->pro_rewrite_sid;
+  c.u.transcode.m_rewrite_pmt = pro->pro_rewrite_pmt;
+  c.u.transcode.m_rewrite_nit = pro->pro_rewrite_nit;
+  #endif
 
   assert(!prch->prch_muxer);
   prch->prch_muxer = muxer_create(&c, hints);
@@ -2683,7 +2786,7 @@ profile_transcode_open(profile_chain_t *prch,
   prch->prch_flags = SUBSCRIPTION_PACKET;
   prch->prch_sq.sq_maxsize = qsize;
 
-  r = profile_transcode_work(prch, &prch->prch_sq.sq_st, 0, 0);
+  r = profile_transcode_work(prch, &prch->prch_sq.sq_st, 0);
   if (r) {
     profile_chain_close(prch);
     return r;

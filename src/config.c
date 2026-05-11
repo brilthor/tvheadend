@@ -56,6 +56,9 @@ struct config config;
 static char config_lock[PATH_MAX];
 static int config_lock_fd;
 static int config_scanfile_ok;
+#if ENABLE_VAAPI
+int vainfo_probe_enabled;
+#endif
 
 /* *************************************************************************
  * Config migration
@@ -514,11 +517,11 @@ config_migrate_v2 ( void )
     htsmsg_destroy(m);
 
     /* Move muxes */
-    hts_settings_buildpath(src, sizeof(src),
-                           "input/iptv/muxes");
-    hts_settings_buildpath(dst, sizeof(dst),
-                           "input/iptv/networks/%s/muxes", ubuf);
-    rename(src, dst);
+    if (!hts_settings_buildpath(src, sizeof(src),
+                                "input/iptv/muxes") &&
+        !hts_settings_buildpath(dst, sizeof(dst),
+                                "input/iptv/networks/%s/muxes", ubuf))
+      rename(src, dst);
   }
 }
 
@@ -531,14 +534,16 @@ config_migrate_v3 ( void )
   char src[1024], dst[1024];
 
   /* Due to having to potentially run this twice! */
-  hts_settings_buildpath(dst, sizeof(dst), "input/dvb/networks");
+  if (hts_settings_buildpath(dst, sizeof(dst), "input/dvb/networks"))
+    return;
   if (!access(dst, R_OK | W_OK))
     return;
 
   if (hts_settings_makedirs(dst))
     return;
 
-  hts_settings_buildpath(src, sizeof(src), "input/linuxdvb/networks");
+  if (hts_settings_buildpath(src, sizeof(src), "input/linuxdvb/networks"))
+    return;
   rename(src, dst);
 }
 
@@ -1774,9 +1779,11 @@ config_boot
   config.iptv_tpool_count = 2;
   config.date_mask = strdup("");
   config.label_formatting = 0;
+  config.dvr_show_seconds = 1;
   config.hdhomerun_ip = strdup("");
   config.local_ip = strdup("");
   config.local_port = 0;
+  config.page_size_ui = 50;
 
   /* Generate default */
   if (!path)
@@ -1818,7 +1825,8 @@ config_boot
   hts_settings_init(config.confdir);
 
   /* Lock it */
-  hts_settings_buildpath(config_lock, sizeof(config_lock), ".lock");
+  if (hts_settings_buildpath(config_lock, sizeof(config_lock), ".lock"))
+    exit(78); /* config error */
   if ((config_lock_fd = file_lock(config_lock, 3)) < 0)
     exit(78); /* config error */
 
@@ -1896,6 +1904,9 @@ config_init ( int backup )
     if (config_migrate(backup))
       config_check();
   }
+#if ENABLE_VAAPI
+  vainfo_probe_enabled = config.enable_vainfo;
+#endif
   tvhinfo(LS_CONFIG, "loaded");
 }
 
@@ -2125,6 +2136,35 @@ config_class_http_auth_algo_list ( void *o, const char *lang )
   return strtab2htsmsg(tab, 1, lang);
 }
 
+htsmsg_t *
+config_class_default_tab_list ( void *o, const char *lang )
+{
+  static const struct strtab tab[] = {
+    { N_("System Default"),        CONFIG_DEFAULT_TAB_SYSTEM },
+    { N_("EPG"),                   CONFIG_DEFAULT_TAB_EPG },
+    { N_("DVR-Upcoming/Current"),  CONFIG_DEFAULT_TAB_DVR_UPCOMING },
+    { N_("DVR-Finished"),          CONFIG_DEFAULT_TAB_DVR_FINISHED },
+    { N_("DVR-Failed"),            CONFIG_DEFAULT_TAB_DVR_FAILED },
+    { N_("DVR-Removed"),           CONFIG_DEFAULT_TAB_DVR_REMOVED },
+    { N_("DVR-Autorecs"),          CONFIG_DEFAULT_TAB_DVR_AUTORECS },
+    { N_("DVR-Timers"),            CONFIG_DEFAULT_TAB_DVR_TIMERS },
+    { N_("Config-General"),        CONFIG_DEFAULT_TAB_CFG_GENERAL },
+    { N_("Config-Users"),          CONFIG_DEFAULT_TAB_CFG_USERS },
+    { N_("Config-DVB Inputs"),     CONFIG_DEFAULT_TAB_CFG_DVB },
+    { N_("Config-Channel/EPG"),    CONFIG_DEFAULT_TAB_CFG_CHANNEL },
+    { N_("Config-Stream"),         CONFIG_DEFAULT_TAB_CFG_STREAM },
+    { N_("Config-Recording"),      CONFIG_DEFAULT_TAB_CFG_REC },
+    { N_("Config-CAs"),            CONFIG_DEFAULT_TAB_CFG_CA },
+    { N_("Config-Debugging"),      CONFIG_DEFAULT_TAB_CFG_DEBUG },
+    { N_("Status-Stream"),         CONFIG_DEFAULT_TAB_STATUS_STREAM },
+    { N_("Status-Subscriptions"),  CONFIG_DEFAULT_TAB_STATUS_SUBS },
+    { N_("Status-Connections"),    CONFIG_DEFAULT_TAB_STATUS_CONN },
+    { N_("Status-Service Mapper"), CONFIG_DEFAULT_TAB_STATUS_SVC },
+    { N_("About"),                 CONFIG_DEFAULT_TAB_ABOUT },
+  };
+  return strtab2htsmsg(tab, 1, lang);
+}
+
 #if ENABLE_MPEGTS_DVB
 static void
 config_muxconfpath_notify_cb(void *opaque, int disarmed)
@@ -2158,6 +2198,7 @@ PROP_DOC(config_picon_path)
 PROP_DOC(config_picon_servicetype)
 PROP_DOC(viewlevel_config)
 PROP_DOC(themes)
+PROP_DOC(page_size)
 
 const idclass_t config_class = {
   .ic_snode      = &config.idnode,
@@ -2193,8 +2234,12 @@ const idclass_t config_class = {
          .number = 6,
       },
       {
-         .name   = N_("Miscellaneous Settings"),
+         .name   = N_("Ports settings"),
          .number = 7,
+      },
+      {
+         .name   = N_("Miscellaneous Settings"),
+         .number = 8,
       },
       {}
   },
@@ -2246,6 +2291,17 @@ const idclass_t config_class = {
       .doc    = prop_doc_themes,
       .list   = theme_get_ui_list,
       .off    = offsetof(config_t, theme_ui),
+      .opts   = PO_DOC_NLIST,
+      .group  = 2
+    },
+    {
+      .type   = PT_U32,
+      .id     = "page_size_ui",
+      .name   = N_("Items per page"),
+      .desc   = N_("The default web interface items per page."),
+      .doc    = prop_doc_page_size,
+      .list   = page_size_get_ui_list,
+      .off    = offsetof(config_t, page_size_ui),
       .opts   = PO_DOC_NLIST,
       .group  = 2
     },
@@ -2329,6 +2385,27 @@ const idclass_t config_class = {
       .desc   = N_("Custom date mask like (%yyyy-%M-%dd %h:%m:%s)"),
       .opts   = PO_ADVANCED,
       .off    = offsetof(config_t, date_mask),
+      .group  = 2,
+    },
+    {
+      .type   = PT_U32,
+      .id     = "default_tab",
+      .name   = N_("Default tab"),
+      .desc   = N_("Set the default start-up tab.  'EPG' is the system default tab."),
+      .list   = config_class_default_tab_list,
+      .off    = offsetof(config_t, default_tab),
+      .opts   = PO_DOC_NLIST,
+      .group  = 2
+    },
+    {
+      .type   = PT_BOOL,
+      .id     = "dvr_show_seconds",
+      .name   = N_("Show DVR seconds"),
+      .desc   = N_("Show seconds in the DVR entry add/edit dialogue window. "
+                   "If disabled, existing seconds can not be edited and "
+                   "new entries will have seconds set to zero."),
+      .opts   = PO_ADVANCED,
+      .off    = offsetof(config_t, dvr_show_seconds),
       .group  = 2,
     },
     {
@@ -2527,19 +2604,20 @@ const idclass_t config_class = {
       .name   = N_("CORS origin"),
       .desc   = N_("HTTP CORS (cross-origin resource sharing) origin. This "
                    "option is usually set when Tvheadend is behind a "
-                   "proxy. Enter a domain (or IP) to allow "
-                   "cross-domain requests."),
+                   "proxy. Enter the URL (domain or IP address, prefixed "
+                   "with http:// or https://) to allow cross-domain requests."),
       .set    = config_class_cors_origin_set,
       .off    = offsetof(config_t, cors_origin),
       .opts   = PO_EXPERT,
       .group  = 5
     },
+#if ENABLE_HDHOMERUN_CLIENT
     {
       .type   = PT_STR,
       .id     = "hdhomerun_ip",
       .name   = N_("HDHomerun IP Address"),
       .desc   = N_("IP address of the HDHomerun device. This is needed if you "
-                   "plan to run TVheadend in a container and you want to stream "
+                   "plan to run Tvheadend in a container and you want to stream "
                    "from an HDHomerun without enabling host networking for "
                    "the container."),
       .off    = offsetof(config_t, hdhomerun_ip),
@@ -2551,9 +2629,9 @@ const idclass_t config_class = {
       .id     = "local_ip",
       .name   = N_("Local IP Address"),
       .desc   = N_("IP of the Docker host. Each HDHomeRun tuner sends data "
-                   "to TVheadend through a socket. This lets you define the "
+                   "to Tvheadend through a socket. This lets you define the "
                    "IP address that HDHomeRun needs to send to. Leave this "
-                   "blank if you want TVheadend to automatically pick an "
+                   "blank if you want Tvheadend to automatically pick an "
                    "address."),
       .off    = offsetof(config_t, local_ip),
       .opts   = PO_HIDDEN | PO_EXPERT,
@@ -2565,7 +2643,7 @@ const idclass_t config_class = {
       .name   = N_("Local Socket Port Number"),
       .desc   = N_("Starting port number of the UDP listeners. The listeners "
                    "listen for traffic from the HDHomerun tuners. This is "
-                   "needed if you plan to run TVheadend in a container and "
+                   "needed if you plan to run Tvheadend in a container and "
                    "you want to stream from an HDHomerun without enabling "
                    "host networking for the container. Set this to 0 if you "
                    "want the port numbers to be assigned dynamically. If you "
@@ -2578,6 +2656,8 @@ const idclass_t config_class = {
       .opts   = PO_HIDDEN | PO_EXPERT,
       .group  = 6
     },
+#endif
+#if ENABLE_HDHOMERUN_SERVER
     {
       .type   = PT_U32,
       .id     = "hdhomerun_server_tuner_count",
@@ -2598,11 +2678,7 @@ const idclass_t config_class = {
                    "Set to zero for Tvheadend to use a default value."
                   ),
       .off    = offsetof(config_t, hdhomerun_server_tuner_count),
-      .opts   = PO_EXPERT
-#if !ENABLE_HDHOMERUN_SERVER
-      | PO_PHIDDEN
-#endif
-      ,
+      .opts   = PO_EXPERT,
       .group  = 6,
     },
     {
@@ -2618,11 +2694,7 @@ const idclass_t config_class = {
                    "for Tvheadend to use a default."
                   ),
       .off    = offsetof(config_t, hdhomerun_server_model_name),
-      .opts   = PO_EXPERT
-#if !ENABLE_HDHOMERUN_SERVER
-      | PO_PHIDDEN
-#endif
-      ,
+      .opts   = PO_EXPERT,
       .group  = 6,
     },
     {
@@ -2634,12 +2706,31 @@ const idclass_t config_class = {
                    "to be used on some media servers."
                   ),
       .off    = offsetof(config_t, hdhomerun_server_enable),
-      .opts   = PO_EXPERT
-#if !ENABLE_HDHOMERUN_SERVER
-      | PO_PHIDDEN
-#endif
-,
+      .opts   = PO_EXPERT,
       .group  = 6
+    },
+#endif
+    {
+      .type   = PT_INT,
+      .id     = "rtsp_udp_min_port",
+      .name   = N_("RTSP UDP minimum port"),
+      .desc   = N_("When using RTSP IPTV, this correspond to the "
+                   "minimum port bind on the client (this server), "
+                   "sent to the server. This is especially useful "
+                   "when using firewalls and NAT or containers."),
+      .off    = offsetof(config_t, rtsp_udp_min_port),
+      .opts   = PO_EXPERT,
+      .group  = 7,
+    },
+    {
+      .type   = PT_INT,
+      .id     = "rtsp_udp_max_port",
+      .name   = N_("RTSP UDP maximum port"),
+      .desc   = N_("Same as above, but for the maximum allowed "
+                   "port. Note that each stream requires two ports."),
+      .off    = offsetof(config_t, rtsp_udp_max_port),
+      .opts   = PO_EXPERT,
+      .group  = 7,
     },
     {
       .type   = PT_STR,
@@ -2648,16 +2739,17 @@ const idclass_t config_class = {
       .desc   = N_("The user agent string for the build-in HTTP client."),
       .off    = offsetof(config_t, http_user_agent),
       .opts   = PO_HIDDEN | PO_EXPERT,
-      .group  = 7,
+      .group  = 8,
     },
     {
       .type   = PT_INT,
+      .intextra = INTEXTRA_RANGE(1, 128, 1),
       .id     = "iptv_tpool",
       .name   = N_("IPTV threads"),
       .desc   = N_("Set the number of threads for IPTV to split load "
                    "across more CPUs."),
       .off    = offsetof(config_t, iptv_tpool_count),
-      .group  = 7,
+      .group  = 8,
     },
     {
       .type   = PT_INT,
@@ -2674,7 +2766,7 @@ const idclass_t config_class = {
       .off    = offsetof(config_t, dscp),
       .list   = config_class_dscp_list,
       .opts   = PO_EXPERT | PO_DOC_NLIST,
-      .group  = 7,
+      .group  = 8,
     },
     {
       .type   = PT_U32,
@@ -2684,7 +2776,7 @@ const idclass_t config_class = {
                    "there is a delay receiving CA keys. "),
       .off    = offsetof(config_t, descrambler_buffer),
       .opts   = PO_EXPERT,
-      .group  = 7,
+      .group  = 8,
     },
     {
       .type   = PT_BOOL,
@@ -2695,7 +2787,18 @@ const idclass_t config_class = {
                    "It may cause issues with some clients / players."),
       .off    = offsetof(config_t, parser_backlog),
       .opts   = PO_EXPERT,
-      .group  = 7,
+      .group  = 8,
+    },
+    {
+      .type   = PT_BOOL,
+      .id     = "auto_clear_input_counters",
+      .name   = N_("Automatically clear input error counters"),
+      .desc   = N_("Periodically resets input error counters "
+                   "(when a new mux starts for the target tuner). "
+                   "Note that previous counters will be lost."),
+      .off    = offsetof(config_t, auto_clear_input_counters),
+      .opts   = PO_EXPERT,
+      .group  = 8,
     },
     {
       .type   = PT_STR,
@@ -2708,7 +2811,7 @@ const idclass_t config_class = {
       .off    = offsetof(config_t, muxconf_path),
       .notify = config_muxconfpath_notify,
       .opts   = PO_ADVANCED,
-      .group  = 7,
+      .group  = 8,
     },
     {
       .type   = PT_BOOL,
@@ -2716,7 +2819,7 @@ const idclass_t config_class = {
       .name   = N_("Parse HbbTV info"),
       .desc   = N_("Parse HbbTV information from services."),
       .off    = offsetof(config_t, hbbtv),
-      .group  = 7,
+      .group  = 8,
       .def.i  = 1,
     },
     {
@@ -2728,7 +2831,7 @@ const idclass_t config_class = {
                    "the system clock (normally only root)."),
       .off    = offsetof(config_t, tvhtime_update_enabled),
       .opts   = PO_EXPERT,
-      .group  = 7,
+      .group  = 8,
     },
     {
       .type   = PT_BOOL,
@@ -2740,7 +2843,7 @@ const idclass_t config_class = {
                    "performance is not that great."),
       .off    = offsetof(config_t, tvhtime_ntp_enabled),
       .opts   = PO_EXPERT,
-      .group  = 7,
+      .group  = 8,
     },
     {
       .type   = PT_U32,
@@ -2752,8 +2855,21 @@ const idclass_t config_class = {
                    "excessive oscillations on the system clock."),
       .off    = offsetof(config_t, tvhtime_tolerance),
       .opts   = PO_EXPERT,
+      .group  = 8,
+    },
+#if ENABLE_VAAPI
+    {
+      .type   = PT_BOOL,
+      .id     = "enable_vainfo",
+      .name   = N_("Enable vainfo detection"),
+      .desc   = N_("Enable vainfo detection in order to show only "
+                   "encoders that are advertised by VAAPI driver.\n"
+                   "NOTE: After save, Tvheadend restart is required!"),
+      .off    = offsetof(config_t, enable_vainfo),
+      .opts   = PO_EXPERT,
       .group  = 7,
     },
+#endif
     {
       .type   = PT_STR,
       .id     = "wizard",

@@ -116,24 +116,23 @@ static void *_epggrab_internal_thread( void *aux )
     if (err == ETIMEDOUT) break;
   }
 
-  clock_gettime(CLOCK_REALTIME, &cron_next);
-  cron_next.tv_nsec = 0;
-
   while (atomic_get(&epggrab_running)) {
 
-    /* Check for config change */
     tvh_mutex_lock(&epggrab_mutex);
+
+    clock_gettime(CLOCK_REALTIME, &current_time);
+    if (!cron_multi_next(epggrab_cron_multi, current_time.tv_sec, &t))
+        cron_next.tv_sec = t;
+    else
+        cron_next.tv_sec += 60;
+
+    /* Check for config change */
     while (atomic_get(&epggrab_running) && confver == epggrab_confver) {
       err = tvh_cond_timedwait_ts(&epggrab_cond, &epggrab_mutex, &cron_next);
       if (err == ETIMEDOUT) break;
     }
     confver    = epggrab_confver;
 
-    clock_gettime(CLOCK_REALTIME, &current_time);
-    if (!cron_multi_next(epggrab_cron_multi, current_time.tv_sec, &t))
-      cron_next.tv_sec = t;
-    else
-      cron_next.tv_sec += 60;
     tvh_mutex_unlock(&epggrab_mutex);
 
     /* Run grabber(s) */
@@ -509,6 +508,48 @@ const idclass_t epggrab_class = {
     {}
   }
 };
+
+/* **************************************************************************
+ * Get the time for the next scheduled internal grabber
+ * *************************************************************************/
+time_t epggrab_get_next_int(void)
+{
+  time_t ret_time;
+  struct timespec current_time;
+
+  clock_gettime(CLOCK_REALTIME, &current_time);
+
+  tvh_mutex_lock(&epggrab_mutex);
+
+  if(cron_multi_next(epggrab_cron_multi, current_time.tv_sec, &ret_time))  //Zero means success
+  {
+    ret_time = 0;   //Reset to zero in case it was set to garbage during failure.
+  }
+  
+  tvh_mutex_unlock(&epggrab_mutex);
+
+  return ret_time;
+
+}//END function
+
+/* **************************************************************************
+ * Count the number of EPG grabbers of a specified type
+ * *************************************************************************/
+int epggrab_count_type(int grabberType)
+{
+  epggrab_module_t *mod;
+  int temp_count = 0;
+
+  LIST_FOREACH(mod, &epggrab_modules, link) {
+    if(mod->enabled && mod->type == grabberType)
+    {
+      temp_count++;
+    }
+  }
+
+  return temp_count;
+
+}
 
 /* **************************************************************************
  * Initialisation
